@@ -1,0 +1,1266 @@
+---
+title: "Koch and Barth Participatory Science and Bombus"
+author: "Jonathan Koch"
+date: "2026-09-20"
+output: html_document
+---
+
+**Author**: Jonathan B. Koch, USDA-ARS Pollinating Insect Research Unit
+**Email**: kochj@hawaii.edu
+
+**Goal**:This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook to in support of a scientific study by J. Koch and Amanda Barth. The title of the study is "Inventory and monitoring of bumble bees can be achieved through participatory science across diverse ecoregions". 
+
+```{r warning=FALSE, include=FALSE, echo=FALSE}
+# Load the libraries
+library(here)
+library(readxl)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(iNEXT)
+library(lubridate)
+library(elevatr)
+library(sp)
+library(raster)
+library(gridExtra)
+```
+
+```{r}
+setwd(here())
+print(getwd())  # Verify the working directory
+dir.create("Figures")
+
+options(timeout = 10000)
+```
+
+## Background.
+The data being analyzed includes the Utah Pollinator Pursuit Dataset and an iNaturalist Dataset. The data only include records being collected in Utah from 2020 to 2023. The data was inspected for errors, which included unifying the species concepts. Bombus californicus was treated as B. fervidus; B. bifarius and B. vancouverensis were treated as B. bifarius/B. vancouverensis.
+
+```{r warning=FALSE, include=FALSE}
+
+# Load data and adjust Pollinator Pursuit data set
+# setwd("/Users/jonathankoch/Library/CloudStorage/Box-Box/0_Collaborative Projects/Amanda Barth/Barth_TeamUtahBombus/0_WorkingAnalysis/Data_v2")
+# list.files()
+
+# Replace 'path_to_your_file.xlsx' with the actual path to your Excel file
+df <- read_excel("UPP Bombus 2020-2023 cleaned_withoutsonorusinSLC.xlsx", sheet = "Sheet1")
+names(df)
+
+# Separate the 'date' column into 'year', 'month', and 'day' columns
+df <- df %>%
+  separate(`Observation Date`, into = c("year", "month", "day"), sep = "-")
+
+# Create a date object
+df$date <- as.Date(with(df, paste(year, month, day, sep = "-")), "%Y-%m-%d")
+
+# Calculate Julian day numbers
+df$julian_day <- as.numeric(strftime(df$date, format = "%j"))
+names(df)
+
+df <- df %>%
+  mutate(`Bombus species` = ifelse(`Bombus species` == "bifarius", "vancouverensis/bifarius", `Bombus species`))
+
+# Add a column that identifies this data as Utah Pollinator Pursuit data (UtahPP)
+df$source <- "UtahPP"
+
+nrow(df)
+```
+
+```{r warning=FALSE, include=FALSE}
+# Load the iNaturalist datset
+df_inat <- read_excel("iNat Bombus 2020-2023 cleaned.xlsx", sheet = "Sheet1")
+
+names(df_inat)
+
+# Separate the 'date' column into 'year', 'month', and 'day' columns
+df_inat <- df_inat %>%
+  separate(`Observation Date`, into = c("year", "month", "day"), sep = "-")
+# Create a date object
+df_inat$date <- as.Date(with(df_inat, paste(year, month, day, sep = "-")), "%Y-%m-%d")
+
+# Calculate Julian day numbers
+df_inat$julian_day <- as.numeric(strftime(df_inat$date, format = "%j"))
+names(df_inat)
+
+df_inat$source <- "iNat"
+
+df_inat <- df_inat %>%
+  mutate(`Bombus species` = ifelse(`Bombus species` == "californicus", "fervidus", `Bombus species`))
+
+df_inat <- df_inat %>%
+  mutate(`Bombus species` = ifelse(`Bombus species` == "vancouverensis nearcticus", "vancouverensis/bifarius", `Bombus species`))
+
+df_inat <- df_inat %>%
+  mutate(`Bombus species` = ifelse(`Bombus species` == "bifarius", "vancouverensis/bifarius", `Bombus species`))
+
+df_inat <- df_inat %>%
+  mutate(`Bombus species` = ifelse(`Bombus species` == "vancouverensis", "vancouverensis/bifarius", `Bombus species`))
+
+df_inat <- df_inat %>% filter(`Bombus species` != "Bombus")
+nrow(df_inat)
+```
+
+```{r}
+# Combine datasets
+names(df)
+names(df_inat)
+
+df_upp <- df %>% dplyr::select("year", "month", "day", "Bombus species",
+                        "x", "y", "julian_day", "source")
+df_upp <- df_upp %>% dplyr::filter(year %in% c(2020, 2021, 2022, 2023))
+
+
+df_inat <- df_inat %>% dplyr::select("year", "month", "day", "Bombus species",
+                        "x", "y", "julian_day", "source")
+df_inat <- df_inat %>% dplyr::filter(year %in% c(2020, 2021, 2022, 2023))
+
+df_all <- rbind(df_upp,df_inat)
+nrow(df_all)
+```
+
+```{r include=FALSE}
+# Add elevation to all the data
+coordinates_df <- dplyr::select(df_all,"x", "y")
+coordinates_df <-as.data.frame(coordinates_df)
+names(coordinates_df)
+nrow(coordinates_df)
+
+# Combine latitude and longitude columns into a POINT geometry
+coordinates_sf <- st_as_sf(coordinates_df, coords = c("x", "y"))
+
+# Assign a CRS (e.g., WGS84, which is commonly used for GPS coordinates)
+st_crs(coordinates_sf) <- st_crs("+proj=longlat +datum=WGS84")
+
+
+elevation_data <- get_elev_point(coordinates_df, prj = "+proj=longlat +datum=WGS84", src = "aws")
+
+df_all <-cbind(df_all,elevation_data)
+nrow(df_all)
+```
+
+```{r include=FALSE}
+# Load Ecoregion shapefile
+
+# Replace "your_shapefile.shp" with the path to your shapefile
+shapefile <- st_read("ut_eco_l3")
+st_crs(coordinates_sf)
+st_crs(shapefile)
+shapefile_transformed <- st_transform(shapefile, crs = st_crs(coordinates_sf))
+
+# Make sure the two files have same CRS
+st_crs(shapefile_transformed)
+st_crs(coordinates_sf)
+
+result <- st_join(coordinates_sf, shapefile_transformed, left = TRUE)
+
+# Read the KML file (assuming it contains polygon data) - this is the Utah Grid
+# load kml data
+kml_file <- "Utah Grid Cells.kml"
+
+# Read the KML file using sf
+kml_data <- st_read(kml_file)
+
+# Ensure both layers have the same CRS
+polygons_sf <- st_transform(kml_data, crs = st_crs(coordinates_sf))
+
+# Perform a spatial join to assign polygon attributes to points where they intersect
+joined_sf <- st_join(coordinates_sf, polygons_sf, join = st_intersects)
+
+nrow(result)
+df_all <-cbind(df_all,result)
+df_all <-cbind(df_all, joined_sf)
+df_all <-as.data.frame(df_all)
+df_all <- subset(df_all, select = -geometry)
+# df_all <- subset(df_all, select = -geometry)
+write.csv(df_all, "df_all.csv", row.names = FALSE)
+```
+
+## Question 1: What species does the Utah Pollinator Pursuit data set have?
+
+```{r warning=FALSE, echo=FALSE}
+df.spp <- unique(df$`Bombus species`)
+df.spp.count <- length(unique(df$`Bombus species`))
+print(paste("The Utah Pollinator Pursuit project detected", df.spp.count, "species."))
+print("The species documented in the Utah Pollinator Pursuit data set include the following:")
+df.spp
+```
+
+## Question 2: How much data does the Utah Pollinator Pursuit data set have?
+
+```{r warning=FALSE, echo=FALSE}
+print(paste("The Utah Pollinator Pursuit data set has", nrow(df), "bumble bee observations collected between 2020 and 2023."))
+```
+
+## Question 3: What species does the iNaturalist data set have?
+
+```{r warning=FALSE, echo=FALSE}
+df_inat.spp <- unique(df_inat$`Bombus species`)
+df_inat.spp.count <- length(unique(df_inat$`Bombus species`))
+print(paste("The Utah iNaturalist project detected", df_inat.spp.count, "species."))
+print("The species documented in the Utah iNaturalist data set include the following:")
+df_inat.spp
+```
+## Question 4: How much data does the iNaturalist data set have?
+
+```{r warning=FALSE, echo=FALSE}
+print(paste("The Utah iNaturalist data set has", nrow(df_inat), "bumble bee observations collected between 2020 and 2023."))
+```
+
+***Combine the Utah Pollinator Pursuit and iNaturalist data sets and report the total number of bumble bee observations captured.***
+
+```{r warning=FALSE, echo=FALSE}
+
+print(paste("The combined datasets have", nrow(df_all), "bumble bee observations."))
+df_final <- df_all
+```
+
+## Question 5a: How many individuals of each species were detected in the Utah Pollinator Pursuit and iNaturalist datasets?
+
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+# Create the table again but as wide_count.
+combination_counts <- df_final %>%
+  count(`Bombus species`, source)
+
+wide_counts <- combination_counts %>%
+  pivot_wider(names_from = source, values_from = n, values_fill = list(n = 0))
+wide_counts
+```
+## Question 5b: Visualize the number of individuals of each species detected in the Utah Pollinator Pursuit and iNaturalist datasets,
+
+```{r warning=FALSE,echo=FALSE, message=FALSE}
+
+# Create a table of count data across species and data set type.
+df_final_count <- df_final %>%
+  group_by(`Bombus species`,source) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+# Create a bar plot using ggplot2
+ggplot(df_final_count, aes(x = reorder(`Bombus species`, -count), y = count, fill = source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Count of individuals detected across species and data sets in Utah (2020-2023)",
+       x = "Species",
+       y = "Count of individuals",
+       fill = "Data set") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+Fig1A <- ggplot(df_final_count, aes(x = reorder(`Bombus species`, -count), y = count, fill = source)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") + # Black border
+  scale_fill_manual(values = c("white", "grey")) +
+  labs(x = "Species",
+       y = "Count of individuals",
+       fill = "Data set") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=14))
+
+ggsave("Figures/Fig1a.png", plot = Fig1A, width = 10, height = 8, units = "in")
+
+```
+
+In this graph iNaturalist data are the pink bars and the Utah Pollinator Pursuit data are the blue bars. The data is organized from most abundant species to least abundant species. The most abundant species in the iNaturalist data set are B. huntii, B. griseocollis, and B. fervidus. The most abundant species in the Utah Pollinator Pursuit data set are B. huntii, B. griseocollis, and B. vancouverensis/B. bifarius.
+
+```{r}
+# Examine distribution of iNaturalist data across years
+
+df_final_count_inat <- df_all %>%
+  filter(source=="iNat")
+
+df_final_count_inat <- df_final_count_inat %>%
+  group_by(`Bombus species`,year) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+# Create a bar plot using ggplot2
+Fig1B <- ggplot(df_final_count_inat, aes(x = reorder(`Bombus species`, -count), y = count, fill = year)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Species in Utah with iNaturalist (2020-2023)",
+       x = "Species",
+       y = "Count of individuals",
+       fill = "Data set") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggsave("Figures/Fig1b.png", plot = Fig1B, width = 10, height = 8, units = "in")
+
+```
+
+```{r}
+# Examine distribution of Utah Pollinator Pursuit data across years
+
+df_final_count_upp <- df_all %>%
+  filter(source=="UtahPP")
+
+df_final_count_upp <- df_final_count_upp %>%
+  group_by(`Bombus species`,year) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+# Create a bar plot using ggplot2
+Fig1C <- ggplot(df_final_count_upp, aes(x = reorder(`Bombus species`, -count), y = count, fill = year)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Species in Utah with Utah Pollinator Pursuit (2020-2023)",
+       x = "Species",
+       y = "Count of individuals",
+       fill = "Data set") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggsave("Figures/Fig1c.png", plot = Fig1C, width = 10, height = 8, units = "in")
+
+```
+
+Is there a significant difference in the number of observations per species across years for UtahPP?
+```{r warning=FALSE, echo=FALSE}
+
+df_final_count_upp <- df_final %>%
+  filter(source=="UtahPP")
+nrow(df_final_count_upp)
+
+# Create a contingency table of the data.
+contingency_table <- table(df_final_count_upp$`Bombus species`, df_final_count_upp$year)
+contingency_table
+
+# Remove specific rows by index (e.g., remove 3rd and 4th rows)
+contingency_table_filtered <- contingency_table[-c(8,9,12,13,15,16), ]
+
+# Display the filtered table
+print(contingency_table_filtered)
+```
+
+Why is there a difference; there might be a year effect; perhaps strongly observed in B. bifarius, B. appositus, B. insularis (2023)?
+
+We answered this question with a Chi-square test.
+
+```{r warning=FALSE, echo=FALSE}
+
+# Perform chi-square test.
+chi_square_result <- chisq.test(contingency_table_filtered)
+
+# Print the results of the chi-square test.
+print(chi_square_result)
+
+library(vcd)
+cramer_v <- assocstats(contingency_table)$cramer
+print(cramer_v)
+
+```
+```{r warning=FALSE, echo=FALSE}
+# Calculate Pearson residuals
+residuals <- chi_square_result$residuals
+
+# Print residuals
+print(residuals)
+
+# Identify cells with large residuals
+significant_cells <- which(abs(residuals) > 2, arr.ind = TRUE)
+
+# Convert residuals to a dataframe for plotting
+res_df <- as.data.frame(as.table(residuals))
+
+# Create a heatmap of residuals
+ggplot(res_df, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-12, 12)) +
+  geom_text(aes(label = sprintf("%.2f", Freq)), color = "black", angle=90) +
+  labs(x = "Species", y = "Year", title = "Residuals of Chi-Square Test") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(res_df, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "white", high = "darkgrey", mid = "lightgrey", midpoint = 0, limit = c(-12, 12)) +
+  geom_text(aes(label = sprintf("%.2f", Freq)), color = "black", angle=90) +
+  labs(x = "Species", y = "Year", title = "UtahPP Residuals of Chi-Square Test") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=14),
+        axis.text.y = element_text(size=14))
+```
+
+Is there a significant difference in the number of observations per species across years for iNat?
+```{r warning=FALSE, echo=FALSE}
+
+df_final_count_inat <- df_final %>%
+  filter(source=="iNat")
+
+# Create a contingency table of the data.
+contingency_table <- table(df_final_count_inat$`Bombus species`, df_final_count_inat$year)
+contingency_table
+
+# Remove specific rows by index (e.g., remove 3rd and 4th rows)
+contingency_table_filtered <- contingency_table[-c(4,8,9,12,13,14,15,16,17), ]
+
+# Display the filtered table
+print(contingency_table_filtered)
+```
+
+Why is there a difference; there might be a year effect; perhaps strongly observed in B. bifarius, B. appositus, B. insularis (2023)?
+
+We answered this question with a Chi-square test.
+
+```{r warning=FALSE, echo=FALSE}
+
+# Perform chi-square test.
+chi_square_result <- chisq.test(contingency_table_filtered)
+
+# Print the results of the chi-square test.
+print(chi_square_result)
+
+cramer_v <- assocstats(contingency_table)$cramer
+print(cramer_v)
+
+```
+```{r warning=FALSE, echo=FALSE}
+# Calculate Pearson residuals
+residuals <- chi_square_result$residuals
+
+# Print residuals
+print(residuals)
+
+# Identify cells with large residuals
+significant_cells <- which(abs(residuals) > 2, arr.ind = TRUE)
+
+# Convert residuals to a dataframe for plotting
+res_df <- as.data.frame(as.table(residuals))
+
+# Create a heatmap of residuals
+ggplot(res_df, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-12, 12)) +
+  geom_text(aes(label = sprintf("%.2f", Freq)), color = "black", angle=90) +
+  labs(x = "Species", y = "Year", title = "Residuals of Chi-Square Test") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(res_df, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "white", high = "darkgrey", mid = "lightgrey", midpoint = 0, limit = c(-12, 12)) +
+  geom_text(aes(label = sprintf("%.2f", Freq)), color = "black", angle=90) +
+  labs(x = "Species", y = "Year", title = "iNat Residuals of Chi-Square Test") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=14),
+        axis.text.y = element_text(size=14))
+```
+
+
+Is there a significant difference in the number of observations per species across years?
+```{r warning=FALSE, echo=FALSE}
+
+df_final_count_upp <- df_final %>%
+  filter(source=="UtahPP")
+
+# Create a contingency table of the data.
+contingency_table <- table(df_final_count_upp$`Bombus species`, df_final_count_upp$year)
+contingency_table
+```
+
+## Is there a difference between the number of species detected between the two data sets?
+
+To answer this question, I generated a contingency table of the data collected. I then used a Chi-square test to determine if there is a significant association between the number of each species detected in Utah and the two community science approaches (Utah Pollinator Pursuit vs. iNaturalist). I then examined the standardized Chi-square test residuals to determine which data set and species are the biggest contributors to rejecting the null hypothesis. The null hypothesis is that there is no significant association between the number of individuals detected per species and the citizen science approach. The alternative hypothesis is that there is a significant association between the number of individuals detected per species and the citizen science approach.
+
+```{r warning=FALSE, echo=FALSE}
+
+# Create a contingency table of the data.
+contingency_table <- table(df_final$`Bombus species`, df_final$source)
+contingency_table
+```
+
+The contingency table shows some species were detected less than 5 times, which may cause the Chi-square approximation to be incorrect, and violate the assumptions of the Chi-square test. Thus, we elected to remove species that had <5 observations in a data set. We elected to remove 4 species: B. kirbiellus, B. melanopygus, B. mixtus, B. sonorus, and B. sylvicola.
+
+Filtered contingency table to remove low frequency species.
+```{r warning=FALSE, echo=FALSE}
+# Remove specific rows by index (e.g., remove 3rd and 4th rows)
+contingency_table_filtered <- contingency_table[-c(8,9,10,16,17), ]
+
+# Display the filtered table
+print(contingency_table_filtered)
+```
+
+##Is there a sigificant difference in the association between the two categorical variables (Species & Data set)? 
+
+We answered this question with a Chi-square test.
+
+```{r warning=FALSE, echo=FALSE}
+
+# Perform chi-square test.
+chi_square_result <- chisq.test(contingency_table_filtered)
+
+# Print the results of the chi-square test.
+print(chi_square_result)
+```
+No warnings were generated from the Chi-square test. The Chi-squre test found a significant association between the number of individuals detected per species and the citizen science approach. Given this result, I next examined the standardized Chi-square test residuals to determine which data set and species are the biggest contributors to rejecting the null hypothesis. 
+
+## What do the test residuals say? 
+
+We next examined the Chi-square test residuals. Residuals with large absolute values (typically greater than 2 or less than -2) indicate categories that contribute more to the chi-square statistic. Absolute values less than 2 indicate categories that do not contribute to the chi-square statistic.
+
+```{r warning=FALSE, echo=FALSE}
+# Calculate Pearson residuals
+residuals <- chi_square_result$residuals
+
+# Print residuals
+print(residuals)
+
+# Identify cells with large residuals
+significant_cells <- which(abs(residuals) > 2, arr.ind = TRUE)
+
+# Convert residuals to a dataframe for plotting
+res_df <- as.data.frame(as.table(residuals))
+
+# Create a heatmap of residuals
+ggplot(res_df, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-12, 12)) +
+  geom_text(aes(label = sprintf("%.2f", Freq)), color = "black", angle=90) +
+  labs(x = "Species", y = "Data set", title = "Residuals of Chi-Square Test") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Chi-square test residuals that are >2 in the Pollinator Pursuit project was associated with nine species/species groups: B. centralis, B. flavifrons, B. occidentalis, B. rufocinctus, and B. vancouverensis/bifarius; and in four species associated with the iNaturalist project: B. griseocollis, B. huntii, and B. morrisoni (Figure 1B). Based on X2 residuals, five species (i.e., B. appositus, B. fervidus, B. insularis, B. nevadensis, B. pensylvanicus) did not have an influence on the X2 test statistic. Of species that are listed as "Endangered" by the IUCN, B. occidentalis was detected more in the Utah Pollinator Pursuit project than in iNaturalist project, whereas B. morrisoni was detected more in the iNaturalist project than the Utah Pollinator Pursuit project. 
+
+Interesting way to look at it, but wants to explore more spatial aspects of this. Both projects are constrained by bias, the bias is going to be different because of UPP smaller # of volunteers; whereas iNAT less constraint, wide open to anybody (is it possible to get users); less deliberate; articulate the number of folks who contribute iNAT data versus UPP. 
+
+## Map the Utah Pollinator Pursuit and iNaturalist data sets.
+The data sets are mapped to the grid system established by the Xerces Society for Invertebrate Conservation Utah Bumble Bee Atlas. The grid systems was provided by Amy Dolan, Endangered Species Conservation Biologist for the Xerces Society.
+
+# iNaturalist data set Map.
+```{r warning=FALSE, include=FALSE}
+
+# Remove the files generated in previous analyses.
+file.remove("inat_points.shp")
+file.remove("inat_points.geojson")
+
+# Make a point file of the Pollinator Pursuit Data
+# Convert to sf object
+inat_sf_points <- st_as_sf(df_inat, coords = c("x", "y"), crs = 4326)
+
+# Save as a shapefile
+st_write(inat_sf_points, "inat_points.shp", append = FALSE)
+
+# Save as a GeoJSON file
+st_write(inat_sf_points, "inat_points.geojson", append = FALSE)
+
+# Inspect the data
+str(inat_sf_points)
+head(inat_sf_points)
+```
+
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+# Plot the map
+inat_plot <- ggplot() +
+  geom_sf(data = kml_data, fill = "white", color = "black", alpha = 0.5) +
+  geom_sf(data = inat_sf_points, aes(color = factor(`Bombus species`)), size = 3) +
+  geom_sf_text(data = kml_data, aes(label = Name), 
+               size = 4, color = "black", nudge_y = 0.01) +
+  theme_minimal() +
+  labs(title = "Utah iNaturalist observations in Utah (2020-2023)",
+       color = "Species",
+        x = "Longitude",
+       y = "Latitude")
+
+ggsave("Figures/Fig2a.png", plot = inat_plot, 
+       width = 10, height = 8, units = "in")
+```
+
+# Utah Pollinator Pursuit data set Map.
+```{r warning=FALSE, include=FALSE, message=FALSE}
+
+# Remove the files generated in previous analyses.
+file.remove("upp_points.shp")
+file.remove("upp_points.geojson")
+
+# Make a point file of the Pollinator Pursuit Data
+# Convert to sf object
+upp_sf_points <- st_as_sf(df, coords = c("x", "y"), crs = 4326)
+
+# Save as a shapefile
+st_write(upp_sf_points, "upp_points.shp", append = FALSE)
+
+# Save as a GeoJSON file
+st_write(upp_sf_points, "upp_points.geojson", append = FALSE)
+
+# Inspect the data
+str(upp_sf_points)
+head(upp_sf_points)
+
+```
+
+```{r warning=FALSE, include=FALSE, message=FALSE}
+
+# Load the KML file given by Amy Dolan of Xerces Society of Invetebrate Conservation.
+
+# load kml data
+kml_file <- "Utah Grid Cells.kml"
+
+# Read the KML file using sf
+kml_data <- st_read(kml_file)
+
+# Inspect the data
+str(kml_data)
+head(kml_data)
+
+```
+
+***Map of Utah Bumble Bee Grid Cells***
+```{r echo=FALSE, warning=FALSE}
+# Plot the map
+ut_grid <- ggplot() +
+  geom_sf(data = kml_data, fill = "white", color = "black", alpha = 0.5) +
+  geom_sf_text(data = kml_data, aes(label = Name), 
+               size = 4, color = "black", nudge_y = 0.01) +
+  theme_minimal() +
+  labs(title = "Utah Bumble Bee Watch Grid Cells",
+       x = "Longitude",
+       y = "Latitude")
+```
+
+```{r warning=FALSE, echo=FALSE, message=FALSE}
+# Plot the map
+UtahPP_plot <- ggplot() +
+  geom_sf(data = kml_data, fill = "white", color = "black", alpha = 0.5) +
+  geom_sf(data = upp_sf_points, aes(color = factor(`Bombus species`)), size = 3) +
+  geom_sf_text(data = kml_data, aes(label = Name), 
+               size = 4, color = "black", nudge_y = 0.01) +
+  theme_minimal() +
+  labs(title = "Utah Pollinator Pursuit observations in Utah (2020-2023)",
+       color = "Species",
+       x = "Longitude",
+       y = "Latitude")
+
+Fig2b<-ggsave("Figures/Fig2b.png", plot = UtahPP_plot, 
+       width = 10, height = 8, units = "in")
+```
+
+```{r}
+library(patchwork)
+combined_plot <- UtahPP_plot + inat_plot
+
+# Save combined plot
+ggsave("Figures/Fig2.png", plot=combined_plot, width = 18, height = 14)
+```
+
+```{r warning=FALSE, message=FALSE, include=FALSE}
+
+# This command is not reported in the print out. This script merges the Utah Pollinator Pursuit dataset with the kml file.
+
+# Merge the KML data and shapefile data based on the common attribute
+# Assuming 'id' is the common attribute
+merged_data <- st_join(upp_sf_points, kml_data)
+
+# Ensure the merged data is an sf object
+merged_sf <- st_as_sf(merged_data)
+
+# Save as a new shapefile
+file.remove("upp_merged_shapefile.shp")
+st_write(merged_sf, "upp_merged_shapefile.shp")
+```
+
+***How many grid square units are in Utah?***
+```{r}
+length(kml_data$Name)
+```
+***How many grid squares were sampled in the Utah Pollinator Pursuit data set?***
+
+```{r}
+length(unique(merged_data$Name))
+```
+
+```{r warning=FALSE, message=FALSE, include=FALSE}
+
+# This command is not reported in the print out. This script merges the Utah Pollinator Pursuit dataset with the kml file.
+
+# Merge the KML data and shapefile data based on the common attribute
+# Assuming 'id' is the common attribute
+merged_data <- st_join(inat_sf_points, kml_data)
+
+# Ensure the merged data is an sf object
+merged_sf <- st_as_sf(merged_data)
+
+# Save as a new shapefile
+file.remove("inat_merged_shapefile.shp")
+st_write(merged_sf, "inat_merged_shapefile.shp")
+```
+
+***How many grid square units are in Utah?***
+```{r}
+length(kml_data$Name)
+```
+***How many grid squares were sampled in the Utah Pollinator Pursuit data set?***
+
+```{r}
+length(unique(merged_data$Name))
+```
+
+Clearly B. huntii (green) is highly detected throughout the state and reported on Utah Pollinator Pursuit.In total there were 40 grid squares sampled out of 76 grid squares (52.6% of grid squares in Utah).
+
+### What is the distribution of the iNaturalist and Utah Pollinator Pursuit data sets relative to Ecoregion?
+```{r echo=FALSE, warning=FALSE}
+# Create the ggmap
+mapUT <- ggplot() +
+  geom_sf(data = shapefile, aes(fill = NA_L3NAME)) + 
+  scale_fill_manual(values = c("#FFDADF", "#FEC9C3", "#DCC2E0", "#C4E9E6", "#F9F3AA", "#C9EAD8", "#F4E6D5")) +  # Define color scale
+  geom_sf(data = coordinates_sf, color = "black", size = 3, shape = 24, fill = "white") +
+  labs(title = "Bumble bee observations across Utah (2020 - 2023)",
+       x="Longitude",
+       y="Latitude")
+```
+
+```{r include=FALSE}
+# Create a table of count data across species and data set type.
+df_ecoregion_count <- df_all %>%
+  group_by(US_L3NAME,source) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+df_ecoregion_count <- df_ecoregion_count %>% drop_na()
+
+# Create a bar plot using ggplot2
+ecoregion_UT <- ggplot(df_ecoregion_count, aes(x = reorder(US_L3NAME, -count), y = count, fill = source)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Community science observations per ecoregion (2020 - 2023)", x = "US Level III EPA Ecoregion", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggsave("Figures/Fig3b.png", plot = ecoregion_UT, 
+       width = 10, height = 8, units = "in")
+```
+
+To achieve this plot, we removed B. kirbiellus from the analysis. This species had only 2 observations.
+
+### Distribution of vulnerable bumble bee species across ecoregions ###
+
+The maps below combine iNaturalist and Utah Pollinator Pursuit data.
+
+***Bombus occidentalis***
+```{r echo=FALSE, warning=FALSE}
+# B. occidentalis specific figures and maps
+
+# Subset out species 
+species_df_inat <- df_all %>%
+  filter(source=="iNat") %>%
+  filter(`Bombus species` == "occidentalis")
+nrow(species_df_inat)
+
+species_df_upp <- df_all %>%
+  filter(source =="UtahPP") %>%
+  filter(`Bombus species` == "occidentalis")
+nrow(species_df_upp)
+
+# assign a reference systems
+species_df_coordinates_inat <- st_as_sf(species_df_inat, coords = c("x", "y"))
+species_df_coordinates_upp <- st_as_sf(species_df_upp, coords = c("x", "y"))
+
+# Assign a CRS (e.g., WGS84, which is commonly used for GPS coordinates)
+st_crs(species_df_coordinates_inat) <- st_crs("+proj=longlat +datum=WGS84")
+st_crs(species_df_coordinates_upp) <- st_crs("+proj=longlat +datum=WGS84")
+
+# Transform to NAD
+species_df_transformed_inat <- st_transform(species_df_coordinates_inat, crs = st_crs(shapefile_transformed))
+species_df_transformed_upp <- st_transform(species_df_coordinates_upp, crs = st_crs(shapefile_transformed))
+
+# Create the ggmap
+g <- ggplot() +
+  geom_sf(data = shapefile, aes(fill = NA_L3NAME)) + 
+  scale_fill_manual(values = c("#FFDADF", "#FEC9C3", "#DCC2E0", "#C4E9E6", "#F9F3AA", "#C9EAD8", "#F4E6D5")) +  # Define color scale
+  geom_sf(data = coordinates_sf, color = "black", size = 3, shape = 21, fill = "grey") +
+  geom_sf(data = species_df_transformed_inat, color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_sf(data = species_df_transformed_upp, color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(title = "Utah Pollinator Pursuit B. occidentalis Spatial Sampling (2020 - 2023)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+g <- g + guides(fill=guide_legend(title="Level III EPA Ecoregion"))
+
+ggsave("Figures/Fig6a.png", plot = g, 
+       width = 8, height = 8, units = "in")
+```
+
+```{r echo=FALSE, warning=FALSE}
+species_jd <- ggplot() +
+  geom_point(data = df_all, aes(x = julian_day, y = elevation),  color = "lightgrey", size = 3, shape = 21, fill = "lightgrey") +
+  geom_point(data = species_df_inat, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_point(data = species_df_upp, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(x = "Julian Day", y = "Elevation (m)") +
+  ggtitle("B. morrisoni phenology across elevation in Utah") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ggsave("Figures/Fig6b.png", plot = species_jd, 
+       width = 8, height = 4, units = "in")
+```
+
+```{r}
+combined_plot <- grid.arrange(g, species_jd, ncol = 1)
+ggsave("Figures/Fig6.png", plot = combined_plot, 
+       width = 8, height = 16, units = "in")
+```
+
+***Bombus morrisoni***
+```{r echo=FALSE, warning=FALSE}
+# B. morrisoni specific figures and maps
+
+# Subset out species 
+species_df_inat <- df_all %>%
+  filter(source=="iNat") %>%
+  filter(`Bombus species` == "morrisoni")
+nrow(species_df_inat)
+
+species_df_upp <- df_all %>%
+  filter(source =="UtahPP") %>%
+  filter(`Bombus species` == "morrisoni")
+nrow(species_df_upp)
+
+# assign a reference systems
+species_df_coordinates_inat <- st_as_sf(species_df_inat, coords = c("x", "y"))
+species_df_coordinates_upp <- st_as_sf(species_df_upp, coords = c("x", "y"))
+
+# Assign a CRS (e.g., WGS84, which is commonly used for GPS coordinates)
+st_crs(species_df_coordinates_inat) <- st_crs("+proj=longlat +datum=WGS84")
+st_crs(species_df_coordinates_upp) <- st_crs("+proj=longlat +datum=WGS84")
+
+# Transform to NAD
+species_df_transformed_inat <- st_transform(species_df_coordinates_inat, crs = st_crs(shapefile_transformed))
+species_df_transformed_upp <- st_transform(species_df_coordinates_upp, crs = st_crs(shapefile_transformed))
+
+# Create the ggmap
+g <- ggplot() +
+  geom_sf(data = shapefile, aes(fill = NA_L3NAME)) + 
+  scale_fill_manual(values = c("#FFDADF", "#FEC9C3", "#DCC2E0", "#C4E9E6", "#F9F3AA", "#C9EAD8", "#F4E6D5")) +  # Define color scale
+  geom_sf(data = coordinates_sf, color = "black", size = 3, shape = 21, fill = "grey") +
+  geom_sf(data = species_df_transformed_inat, color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_sf(data = species_df_transformed_upp, color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(title = "Utah Pollinator Pursuit B. morrisoni Spatial Sampling (2020 - 2023)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+g <- g + guides(fill=guide_legend(title="Level III EPA Ecoregion"))
+
+ggsave("Figures/Fig7a.png", plot = g, 
+       width = 8, height = 8, units = "in")
+```
+
+```{r echo=FALSE, warning=FALSE}
+species_jd <- ggplot() +
+  geom_point(data = df_all, aes(x = julian_day, y = elevation),  color = "lightgrey", size = 3, shape = 21, fill = "lightgrey") +
+  geom_point(data = species_df_inat, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_point(data = species_df_upp, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(x = "Julian Day", y = "Elevation (m)") +
+  ggtitle("B. morrisoni phenology across elevation in Utah") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ggsave("Figures/Fig7b.png", plot = species_jd, 
+       width = 8, height = 4, units = "in")
+```
+
+```{r}
+combined_plot <- grid.arrange(g, species_jd, ncol = 1)
+ggsave("Figures/Fig7.png", plot = combined_plot, 
+       width = 8, height = 16, units = "in")
+```
+
+***Bombus pensylvanicus***
+```{r echo=FALSE, warning=FALSE}
+# B. pensylvanicus specific figures and maps
+
+# Subset out species 
+species_df_inat <- df_all %>%
+  filter(source=="iNat") %>%
+  filter(`Bombus species` == "pensylvanicus")
+nrow(species_df_inat)
+
+species_df_upp <- df_all %>%
+  filter(source =="UtahPP") %>%
+  filter(`Bombus species` == "pensylvanicus")
+nrow(species_df_upp)
+
+# assign a reference systems
+species_df_coordinates_inat <- st_as_sf(species_df_inat, coords = c("x", "y"))
+species_df_coordinates_upp <- st_as_sf(species_df_upp, coords = c("x", "y"))
+
+# Assign a CRS (e.g., WGS84, which is commonly used for GPS coordinates)
+st_crs(species_df_coordinates_inat) <- st_crs("+proj=longlat +datum=WGS84")
+st_crs(species_df_coordinates_upp) <- st_crs("+proj=longlat +datum=WGS84")
+
+# Transform to NAD
+species_df_transformed_inat <- st_transform(species_df_coordinates_inat, crs = st_crs(shapefile_transformed))
+species_df_transformed_upp <- st_transform(species_df_coordinates_upp, crs = st_crs(shapefile_transformed))
+
+# Create the ggmap
+g <- ggplot() +
+  geom_sf(data = shapefile, aes(fill = NA_L3NAME)) + 
+  scale_fill_manual(values = c("#FFDADF", "#FEC9C3", "#DCC2E0", "#C4E9E6", "#F9F3AA", "#C9EAD8", "#F4E6D5")) +  # Define color scale
+  geom_sf(data = coordinates_sf, color = "black", size = 3, shape = 21, fill = "grey") +
+  geom_sf(data = species_df_transformed_inat, color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_sf(data = species_df_transformed_upp, color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(title = "Utah Pollinator Pursuit B. pensylvanicus Spatial Sampling (2020 - 2023)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+g <- g + guides(fill=guide_legend(title="Level III EPA Ecoregion"))
+
+ggsave("Figures/Fig8a.png", plot = g, 
+       width = 8, height = 8, units = "in")
+```
+
+```{r echo=FALSE, warning=FALSE}
+species_jd <- ggplot() +
+  geom_point(data = df_all, aes(x = julian_day, y = elevation),  color = "lightgrey", size = 3, shape = 21, fill = "lightgrey") +
+  geom_point(data = species_df_inat, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_point(data = species_df_upp, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(x = "Julian Day", y = "Elevation (m)") +
+  ggtitle("B. morrisoni phenology across elevation in Utah") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ggsave("Figures/Fig8b.png", plot = species_jd, 
+       width = 8, height = 4, units = "in")
+```
+
+```{r}
+combined_plot <- grid.arrange(g, species_jd, ncol = 1)
+ggsave("Figures/Fig8.png", plot = combined_plot, 
+       width = 8, height = 16, units = "in")
+```
+
+***Bombus pensylvanicus***
+```{r echo=FALSE, warning=FALSE}
+# B. sonorus specific figures and maps
+
+# Subset out species 
+species_df_inat <- df_all %>%
+  filter(source=="iNat") %>%
+  filter(`Bombus species` == "sonorus")
+nrow(species_df_inat)
+
+species_df_upp <- df_all %>%
+  filter(source =="UtahPP") %>%
+  filter(`Bombus species` == "sonorus")
+nrow(species_df_upp)
+
+# assign a reference systems
+species_df_coordinates_inat <- st_as_sf(species_df_inat, coords = c("x", "y"))
+species_df_coordinates_upp <- st_as_sf(species_df_upp, coords = c("x", "y"))
+
+# Assign a CRS (e.g., WGS84, which is commonly used for GPS coordinates)
+st_crs(species_df_coordinates_inat) <- st_crs("+proj=longlat +datum=WGS84")
+st_crs(species_df_coordinates_upp) <- st_crs("+proj=longlat +datum=WGS84")
+
+# Transform to NAD
+species_df_transformed_inat <- st_transform(species_df_coordinates_inat, crs = st_crs(shapefile_transformed))
+species_df_transformed_upp <- st_transform(species_df_coordinates_upp, crs = st_crs(shapefile_transformed))
+
+# Create the ggmap
+g <- ggplot() +
+  geom_sf(data = shapefile, aes(fill = NA_L3NAME)) + 
+  scale_fill_manual(values = c("#FFDADF", "#FEC9C3", "#DCC2E0", "#C4E9E6", "#F9F3AA", "#C9EAD8", "#F4E6D5")) +  # Define color scale
+  geom_sf(data = coordinates_sf, color = "black", size = 3, shape = 21, fill = "grey") +
+  geom_sf(data = species_df_transformed_inat, color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_sf(data = species_df_transformed_upp, color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(title = "Utah Pollinator Pursuit B. sonorus Spatial Sampling (2020 - 2023)") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+g <- g + guides(fill=guide_legend(title="Level III EPA Ecoregion"))
+
+ggsave("Figures/Fig9a.png", plot = g, 
+       width = 8, height = 8, units = "in")
+```
+
+```{r echo=FALSE, warning=FALSE}
+species_jd <- ggplot() +
+  geom_point(data = df_all, aes(x = julian_day, y = elevation),  color = "lightgrey", size = 3, shape = 21, fill = "lightgrey") +
+  geom_point(data = species_df_inat, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "yellow") +
+  geom_point(data = species_df_upp, aes(x = julian_day, y = elevation), color = "black", size = 3, shape = 24, fill = "orange") +
+  labs(x = "Julian Day", y = "Elevation (m)") +
+  ggtitle("B. morrisoni phenology across elevation in Utah") +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+ggsave("Figures/Fig9b.png", plot = species_jd, 
+       width = 8, height = 4, units = "in")
+```
+
+```{r}
+combined_plot <- grid.arrange(g, species_jd, ncol = 1)
+ggsave("Figures/Fig9.png", plot = combined_plot, 
+       width = 8, height = 16, units = "in")
+```
+
+# Rarefaction analysis for iNaturalist (Fig5)
+```{r warning=FALSE, include=FALSE}
+
+# Count the combinations of Category1 and Category2 for the Utah Pollinator Pursuit data merged with the KML file.
+merged_sf_counts <- merged_sf %>%
+  count(Name, `Bombus species`)
+
+wide_counts <- merged_sf_counts %>%
+  pivot_wider(names_from = `Bombus species`, values_from = n, values_fill = list(n = 0))
+
+wide_counts$geometry<-NULL
+
+summarized_df <- wide_counts %>%
+  group_by(Name) %>%
+  summarise(across(where(is.numeric), sum, .names = "{.col}"))
+
+summarized_df <- summarized_df[summarized_df$Name != "CLOSED", ]
+nrow(summarized_df)
+clean_df <- na.omit(summarized_df)
+nrow(summarized_df)
+
+summarized_df <-t(summarized_df)
+colnames(summarized_df) <- as.character(unlist(summarized_df[1, ]))
+summarized_df <- summarized_df[-1, ]
+
+# Drop the last column
+summarized_df <- summarized_df[ , -ncol(summarized_df)]
+is.matrix(summarized_df)
+
+# Check if matrix is numeric
+all_numeric <- all(apply(summarized_df, 2, is.numeric))  # Check column-wise
+
+if (!all_numeric) {
+  mat <- matrix(as.numeric(summarized_df), ncol = ncol(summarized_df))
+}
+
+rownames(mat) <- rownames(summarized_df)
+colnames(mat) <- colnames(summarized_df)
+
+# Filter rows where the sum is not equal to 1
+df_filtered <- mat[rowSums(mat) != 1, ] #WORKS so far.
+
+# Calculate column sums
+column_sums <- colSums(mat) 
+column_sums
+
+# Remove columns that sum to 1
+mat_test <- mat[, column_sums != 1]
+ncol(mat)
+ncol(mat_test) #WORKS
+
+# Calculate column sums
+column_sums <- colSums(mat_test)
+column_sums #WORKS
+
+nrow(df_filtered)
+df_filtered <- mat[rowSums(mat) != 0, ]
+nrow(df_filtered) #WORKS
+
+# Function to identify columns with only one non-zero element
+remove_columns <- function(mat) {
+  # Apply a function to each column to check for columns with exactly one non-zero element
+  cols_to_keep <- apply(mat, 2, function(col) sum(col != 0) != 1)
+  # Return the matrix without the columns with exactly one non-zero element
+  return(mat[, cols_to_keep])
+}
+
+# Remove columns with only one non-zero element
+result_matrix <- remove_columns(mat_test)
+ncol(mat_test)
+ncol(result_matrix) #WORKS
+# Calculate column sums
+
+column_sums <- colSums(result_matrix)
+column_sums
+# write.csv(result_matrix, "/Users/jonathankoch/Library/CloudStorage/Box-Box/0_Collaborative Projects/Amanda Barth/Barth_TeamUtahBombus/0_WorkingAnalysis/Data_v2/0 Final Figures/upp_gridspecies.csv")
+```
+
+
+```{r warning=FALSE, include=FALSE}
+file.remove("Figures/Fig5.png")
+
+# Estimate species richness for the Utah Pollinator Pursuit Data
+iNEXT_out <- iNEXT(result_matrix, datatype = "abundance")
+plot <- suppressWarnings(ggiNEXT(iNEXT_out))
+ggsave("Figures/Fig5.png", plot = plot, 
+       width = 10, height = 8, units = "in")
+```
+
+# Rarefaction analysis for Utah Pollinator Pursuit (Fig4)
+```{r warning=FALSE, message=FALSE, include=FALSE}
+
+# This command is not reported in the print out. This script merges the Utah Pollinator Pursuit dataset with the kml file.
+
+# Merge the KML data and shapefile data based on the common attribute
+# Assuming 'id' is the common attribute
+merged_data <- st_join(upp_sf_points, kml_data)
+
+# Ensure the merged data is an sf object
+merged_sf <- st_as_sf(merged_data)
+
+# Save as a new shapefile
+file.remove("upp_merged_shapefile.shp")
+st_write(merged_sf, "upp_merged_shapefile.shp")
+```
+
+# Rarefaction analysis for iNaturalist (Fig4)
+```{r warning=FALSE, include=FALSE}
+
+# Count the combinations of Category1 and Category2 for the Utah Pollinator Pursuit data merged with the KML file.
+merged_sf_counts <- merged_sf %>%
+  count(Name, `Bombus species`)
+
+wide_counts <- merged_sf_counts %>%
+  pivot_wider(names_from = `Bombus species`, values_from = n, values_fill = list(n = 0))
+
+wide_counts$geometry<-NULL
+
+summarized_df <- wide_counts %>%
+  group_by(Name) %>%
+  summarise(across(where(is.numeric), sum, .names = "{.col}"))
+
+summarized_df <- summarized_df[summarized_df$Name != "CLOSED", ]
+nrow(summarized_df)
+clean_df <- na.omit(summarized_df)
+nrow(summarized_df)
+
+summarized_df <-t(summarized_df)
+colnames(summarized_df) <- as.character(unlist(summarized_df[1, ]))
+summarized_df <- summarized_df[-1, ]
+
+# Drop the last column
+summarized_df <- summarized_df[ , -ncol(summarized_df)]
+is.matrix(summarized_df)
+
+# Check if matrix is numeric
+all_numeric <- all(apply(summarized_df, 2, is.numeric))  # Check column-wise
+
+if (!all_numeric) {
+  mat <- matrix(as.numeric(summarized_df), ncol = ncol(summarized_df))
+}
+
+rownames(mat) <- rownames(summarized_df)
+colnames(mat) <- colnames(summarized_df)
+
+# Filter rows where the sum is not equal to 1
+df_filtered <- mat[rowSums(mat) != 1, ] #WORKS so far.
+
+# Calculate column sums
+column_sums <- colSums(mat) 
+column_sums
+
+# Remove columns that sum to 1
+mat_test <- mat[, column_sums != 1]
+ncol(mat)
+ncol(mat_test) #WORKS
+
+# Calculate column sums
+column_sums <- colSums(mat_test)
+column_sums #WORKS
+
+nrow(df_filtered)
+df_filtered <- mat[rowSums(mat) != 0, ]
+nrow(df_filtered) #WORKS
+
+# Function to identify columns with only one non-zero element
+remove_columns <- function(mat) {
+  # Apply a function to each column to check for columns with exactly one non-zero element
+  cols_to_keep <- apply(mat, 2, function(col) sum(col != 0) != 1)
+  # Return the matrix without the columns with exactly one non-zero element
+  return(mat[, cols_to_keep])
+}
+
+# Remove columns with only one non-zero element
+result_matrix <- remove_columns(mat_test)
+ncol(mat_test)
+ncol(result_matrix) #WORKS
+# Calculate column sums
+
+column_sums <- colSums(result_matrix)
+column_sums
+# write.csv(result_matrix, "/Users/jonathankoch/Library/CloudStorage/Box-Box/0_Collaborative Projects/Amanda Barth/Barth_TeamUtahBombus/0_WorkingAnalysis/Data_v2/0 Final Figures/upp_gridspecies.csv")
+```
+
+
+```{r warning=FALSE, include=FALSE}
+file.remove("Figures/Fig4.png")
+
+# Estimate species richness for the Utah Pollinator Pursuit Data
+iNEXT_out <- iNEXT(result_matrix, datatype = "abundance")
+plot <- suppressWarnings(ggiNEXT(iNEXT_out))
+ggsave("Figures/Fig4.png", plot = plot, 
+       width = 10, height = 8, units = "in")
+```
+
+## How well sampled are each grid square based on rarefaction?
+
+To answer this question, I used the iNEXT package in R. The iNEXT package estimates species richness and diversity (Simpson and Shannon Index) for a sample site.
+
+## Rarefaction of the Utah Pollinator Pursuit data set.
+
+The following graph represents species diversity rarefaction curves for each grid square assigned to Utah by the Xerces Society for Invertebrate Conservation to survey bumble bees in Utah. The data set being examined is the Utah Pollinator Pursuit data. Most grid squares did not achieve an asymptotic curve demonstrating that the grid square likley has not been sampled enough to detect all the likely species in the grid square. Thus, there is a lot of opportunity for continued sampling of bumble bees with the single data set.
+
+Of the 40 grid squares sampled, the graph suggests that 3 grid squares likely were well sampled for all known species as the curves reach an asymptotic curve (i.e., 8.8% of the grid squares are well sampled) prior to extrapolation (dashed line). The well-sampled grid squares include UT_18, UT_13, UT_14. 
+
+***Utah Pollinator Pursuit species diversity rarefaction curve***
+
+```{r warning=FALSE, include=FALSE}
+UtahPP_iNEXTEst <- as.data.frame(iNEXT_out$iNextEst$size_based)
+
+UtahPP_filter <- UtahPP_iNEXTEst %>% filter(Method=="Rarefaction" & m>150)
+unique(UtahPP_filter$Assemblage) 
+
+# only 1 grid cell likely approached a complete inventory of bumble bee species. This cell in Salt lake City, Utah.
+```
+
+### Synthesis of rarefaction analyses
+
+The Utah Pollinator Pursuit data set set appears to have achieved a species diversity (SD) asymptotic curve beyond (including extrapolated SD) at 150 observations in the following grid cells: UT_13 (Vernal), UT_18 (Salt Lake City), UT_24 (South Salt Lake City) and UT_62 (St. George). The iNaturalist data set appears to have reached an SD asymptotic curve (including extrapolated SD) at 150 observations with the following grid cells: UT_18 (Salt Lake City) and UT_24 (South Salt Lake City). Our data suggests there is a continued need to expand community science initiatives beyond populated areas. Targeted initiatives or adoption of a grid square by community scientist and stakeholders will increase approach to an asymptotic curve of species diversity.
+
+***Utah Counties Map***
+```{r}
+# Load County shapefile
+
+g <- ggplot() +
+  geom_sf(data = shapefile, aes(fill = NA_L3NAME)) + 
+  scale_fill_manual(values = c("#FFDADF", "#FEC9C3", "#DCC2E0", "#C4E9E6", "#F9F3AA", "#C9EAD8", "#F4E6D5")) +  # Define color scale
+  geom_sf(data = coordinates_sf, color = "black", size = 3, shape = 24, fill = "white") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), axis.line = element_line(colour = "black"))
+
+g <- g + guides(fill=guide_legend(title="Level III EPA Ecoregion"))
+
+ggsave("Figures/Fig3a.png", plot = g, 
+       width = 10, height = 8, units = "in")
+
+```
+
+# County Analysis
+```{r}
+# Replace "your_shapefile.shp" with the path to your shapefile
+shapefile <- st_read("UtahCountyBoundaries_6245553605277884471")
+st_crs(coordinates_sf)
+st_crs(shapefile)
+shapefile_transformed <- st_transform(shapefile, crs = st_crs(coordinates_sf))
+
+# Make sure the two files have same CRS
+st_crs(shapefile_transformed)
+st_crs(coordinates_sf)
+
+result <- st_join(coordinates_sf, shapefile_transformed, left = TRUE)
+nrow(result)
+df_all <-cbind(df_all,result)
+df_all <-as.data.frame(df_all)
+df_all <- subset(df_all, select = -geometry)
+
+# Create a table of count data across species and data set type.
+df_county_count <- df_all %>%
+  group_by(NAME,source,POP_LASTCE) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+df_county_count <- df_county_count %>% drop_na()
+
+# seperate out by dataset
+county_inat <- df_county_count %>%
+  filter(source=="iNat")
+plot(county_inat$POP_LASTCE, county_inat$count)
+cor.test(county_inat$POP_LASTCE, county_inat$count, method="spearman")
+nrow(county_inat)
+# seperate out by dataset
+county_UtahPP <- df_county_count %>%
+  filter(source=="UtahPP")
+plot(county_UtahPP$POP_LASTCE, county_UtahPP$count)
+cor.test(county_UtahPP$POP_LASTCE, county_UtahPP$count, method="spearman")
+```
+
